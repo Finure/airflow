@@ -17,6 +17,7 @@ GCS_INPUT_BLOB = os.environ.get('INPUT_FILE_PATH', 'datasets/in/dataset.csv')
 GCS_OUTPUT_PREFIX = os.environ.get('OUTPUT_FILE_PREFIX', 'datasets/out')
 GCS_REJECT_PREFIX = os.environ.get("REJECT_FILE_PREFIX", 'datasets/reject')
 SLACK_WEBHOOK_URL = os.environ.get('SLACK_WEBHOOK_URL')  
+ARGO_WEBHOOK_URL = os.environ.get('ARGO_WEBHOOK_URL')
 
 # Validation
 CREDIT_SCORE_MIN = 0
@@ -239,6 +240,39 @@ with DAG(
         ti.xcom_push(key="cleaned_object_path", value=cleaned_name)
         ti.xcom_push(key="rejects_object_path", value=rejects_name)
 
+    def _notify_argo(**context):
+        """Send a notification to Argo with the produced object paths"""
+        import json, urllib.request
+        ti = context["ti"]
+
+        webhook = ARGO_WEBHOOK_URL
+        if not webhook:
+            print("ARGO_WEBHOOK_URL not set, skipping Argo notify")
+            return
+
+        cleaned_obj = ti.xcom_pull(task_ids="upload_to_gcs", key="cleaned_object_path")
+        rejects_obj = ti.xcom_pull(task_ids="upload_to_gcs", key="rejects_object_path")
+
+        payload = {
+            "bucket": GCS_BUCKET,
+            "input": GCS_INPUT_BLOB,
+            "outfile": cleaned_obj,          
+            "rejects_file": rejects_obj,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        }
+
+        req = urllib.request.Request(
+            webhook,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                print(f"Argo notify status: {resp.status}")
+        except Exception as e:
+            print(f"Argo notify failed: {e}")
+
     def _slack_report(**context):
         import json, urllib.request
         ti = context["ti"]
@@ -292,10 +326,16 @@ with DAG(
         python_callable=_upload_to_gcs,
     )
 
+    argo_notify = PythonOperator(
+        task_id="notify_argo",
+        python_callable=_notify_argo,
+        trigger_rule="all_done",
+    )
+
     slack = PythonOperator(
         task_id="slack_report",
         python_callable=_slack_report,
         trigger_rule="all_done",
     )
 
-    download >> validate_clean >> upload >> slack
+    download >> validate_clean >> upload >> argo_notify >> slack
