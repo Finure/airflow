@@ -1,0 +1,7 @@
+tests/
+**/*.ipynb
+**/*.md
+**/*.csv
+README.md
+requirements.txt
+Dockerfile
